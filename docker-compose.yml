@@ -1,0 +1,151 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Volumes — one per service so backups / restores stay independent
+# ---------------------------------------------------------------------------
+volumes:
+  influxdb_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Network topology  — /29 gives 6 usable host addresses:
+#
+#   172.28.0.1  — bridge gateway (Docker host side)
+#   172.28.0.2  — influxdb
+#   172.28.0.3  — grafana
+#   172.28.0.4  — announcer (ephemeral, exits after printing)
+#   172.28.0.5  — reserved
+#   172.28.0.6  — reserved
+#
+# Grafana → InfluxDB: http://influxdb:8086   (Docker DNS — recommended)
+#                     http://172.28.0.2:8086 (static IP  — equally valid)
+# ---------------------------------------------------------------------------
+networks:
+  monitoring:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/29
+          gateway: 172.28.0.1
+
+services:
+
+  # -------------------------------------------------------------------------
+  # InfluxDB 1.x  (latest 1.x image — currently 1.12)
+  # Accepts metrics on host port 8086
+  # Retention is set to 60 days via an init script
+  # Static IP: 172.28.0.2
+  # -------------------------------------------------------------------------
+  influxdb:
+    image: influxdb:1.12
+    container_name: influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"               # expose to host so external agents can push
+    environment:
+      INFLUXDB_DB:                  ${INFLUXDB_DB}
+      INFLUXDB_HTTP_AUTH_ENABLED:   ${INFLUXDB_HTTP_AUTH_ENABLED}
+      INFLUXDB_ADMIN_USER:          ${INFLUXDB_ADMIN_USER}
+      INFLUXDB_ADMIN_PASSWORD:      ${INFLUXDB_ADMIN_PASSWORD}
+      INFLUXDB_READ_USER:           ${INFLUXDB_READ_USER}
+      INFLUXDB_READ_USER_PASSWORD:  ${INFLUXDB_READ_USER_PASSWORD}
+      INFLUXDB_HTTP_BIND_ADDRESS:   ":8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb
+      - ./influxdb/influxdb.conf:/etc/influxdb/influxdb.conf:ro
+      - ./influxdb/init-retention.sh:/docker-entrypoint-initdb.d/init-retention.sh:ro
+    networks:
+      monitoring:
+        ipv4_address: 172.28.0.2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # -------------------------------------------------------------------------
+  # Grafana (latest stable OSS image)
+  # UI reachable on host port 3000 over plain HTTP
+  # Static IP: 172.28.0.3
+  # Connects to InfluxDB at:
+  #   http://influxdb:8086   (Docker DNS — recommended)
+  #   http://172.28.0.2:8086 (static IP — equally valid)
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER:          ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD:      ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_SECURITY_SECRET_KEY:          ${GF_SECURITY_SECRET_KEY}
+      GF_SERVER_PROTOCOL:              http
+      GF_ANALYTICS_REPORTING_ENABLED:  "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES:  "false"
+      GF_DATABASE_WAL:                 "true"
+      # Credentials forwarded into provisioning templates
+      INFLUXDB_DB:                     ${INFLUXDB_DB}
+      INFLUXDB_READ_USER:              ${INFLUXDB_READ_USER}
+      INFLUXDB_READ_USER_PASSWORD:     ${INFLUXDB_READ_USER_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      monitoring:
+        ipv4_address: 172.28.0.3
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health | grep -q '\"database\": \"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # Announcer — ephemeral alpine container that prints access URLs once both
+  # InfluxDB and Grafana pass their healthchecks, then exits (restart: no).
+  # The host LAN IP is auto-detected via the default-route gateway address.
+  # -------------------------------------------------------------------------
+  announcer:
+    image: alpine:3.20
+    container_name: stack_announcer
+    restart: "no"
+    networks:
+      monitoring:
+        ipv4_address: 172.28.0.4
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        HOST_IP=$$(ip route | awk '/default/ {print $$3; exit}');
+        echo '';
+        echo '╔══════════════════════════════════════════════════════════════╗';
+        echo '║           ✅  Stack is up and ready!                        ║';
+        echo '╠══════════════════════════════════════════════════════════════╣';
+        echo '║  Grafana UI                                                  ║';
+        echo \"║    → http://localhost:3000      (from this machine)          ║\";
+        echo \"║    → http://$$HOST_IP:3000      (from LAN / remote)         ║\";
+        echo '╠══════════════════════════════════════════════════════════════╣';
+        echo '║  InfluxDB write endpoint                                     ║';
+        echo \"║    → http://localhost:8086      (from this machine)          ║\";
+        echo \"║    → http://$$HOST_IP:8086      (from LAN / remote)         ║\";
+        echo '╠══════════════════════════════════════════════════════════════╣';
+        echo '║  Internal Docker network  172.28.0.0/29                      ║';
+        echo '║    influxdb  172.28.0.2                                      ║';
+        echo '║    grafana   172.28.0.3                                      ║';
+        echo '║  Grafana → InfluxDB:  http://influxdb:8086    (DNS)         ║';
+        echo '║                       http://172.28.0.2:8086  (static IP)   ║';
+        echo '╚══════════════════════════════════════════════════════════════╝';
+        echo '';
+      "
