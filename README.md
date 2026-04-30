@@ -87,6 +87,33 @@ docker compose down
 
 # Остановить и удалить данные (внимание — удалит volumes!)
 docker compose down -v
+#  полная очистка 
+
+# 1. Остановить всё
+docker compose down
+
+# 2. Удалить volumes (ВСЕ данные будут стёрты!)
+docker compose down -v
+
+# 3. Убедиться что volumes удалены
+docker volume ls | grep influxdb
+docker volume ls | grep grafana
+
+# 4. Если остались — удалить вручную
+docker volume rm influxdb-grafana_influxdb_data
+docker volume rm influxdb-grafana_grafana_data
+
+# 5. Почистить возможно зависшие контейнеры
+docker rm -f influxdb grafana stack_announcer 2>/dev/null || true
+
+# 6. Почистить образы (опционально, если хочешь свежие pull)
+docker rmi influxdb:1.12 grafana/grafana:latest alpine:3.20
+
+# 7. Запустить с нуля
+docker compose up -d
+
+# 8. Следить за логами включая announcer
+docker compose logs -f
 
 # Обновить образы
 docker compose pull && docker compose up -d
