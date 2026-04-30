@@ -4,18 +4,20 @@
 
 ```
 .
-├── docker-compose.yml
-├── .env                          ← секреты (не коммитить в git!)
-├── .gitignore
+influxdb-grafana/
+├── docker-compose.yml       ← 3 сервиса: influxdb, grafana, telegraf
+├── .env
 ├── influxdb/
-│   ├── influxdb.conf             ← конфиг InfluxDB
-│   └── init-retention.sh         ← устанавливает политику хранения 60 дней
-└── grafana/
-    └── provisioning/
-        ├── datasources/
-        │   └── influxdb.yml      ← автоматическое подключение InfluxDB
-        └── dashboards/
-            └── dashboard.yml     ← провайдер дашбордов
+│   ├── influxdb.conf
+│   └── init-retention.sh
+├── telegraf/
+│   └── telegraf.conf
+├── grafana/
+│   └── provisioning/...
+└── data_generator/          ← живёт на хосте, вне Docker
+    ├── cpu_generator.py
+    ├── requirements.txt
+    └── README.md
 ```
 
 ## Быстрый старт

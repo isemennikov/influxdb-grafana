@@ -1,0 +1,3 @@
+# cpu_generator.py uses only Python stdlib — no external packages needed.
+# This file is a placeholder so `pip install -r requirements.txt` works
+# cleanly if you add dependencies later (e.g. influxdb-client, requests).
